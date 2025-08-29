@@ -7,13 +7,15 @@ import { Calendar, Cat, Sun, Moon, Check, User, Wifi, WifiOff } from 'lucide-rea
 
 // Initialize Supabase client - Replace these with your actual values
 const supabaseUrl = import.meta.env.REACT_APP_SUPABASE_URL || 'https://htpnrefiowyggnviwihg.supabase.co';
-const supabaseAnonKey = import.meta.env.REACT_APP_SUPABASE_ANON_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imh0cG5yZWZpb3d5Z2dudml3aWhnIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTY0ODI5MTEsImV4cCI6MjA3MjA1ODkxMX0.KvPQ_rxPpDboqrqwH8HrJQXg9JjJ8e603OZpeQtvH4I';
+const supabaseAnonKey =
+  import.meta.env.REACT_APP_SUPABASE_ANON_KEY ||
+  'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imh0cG5yZWZpb3d5Z2dudml3aWhnIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTY0ODI5MTEsImV4cCI6MjA3MjA1ODkxMX0.KvPQ_rxPpDboqrqwH8HrJQXg9JjJ8e603OZpeQtvH4I';
 const supabase = createClient(supabaseUrl, supabaseAnonKey);
 
 const CatFeedingScheduler = () => {
   const startDate = new Date('2025-08-29');
   const endDate = new Date('2025-09-19');
-  
+
   const generateDates = () => {
     const dates = [];
     const current = new Date(startDate);
@@ -23,31 +25,46 @@ const CatFeedingScheduler = () => {
     }
     return dates;
   };
-  
+
   const allDates = generateDates();
   const neighbors = ['Karen', 'Hillary', 'Darlene', 'Kelly'];
-  
+
   const [schedule, setSchedule] = useState({});
   const [selectedPerson, setSelectedPerson] = useState('');
   const [loading, setLoading] = useState(true);
   const [connected, setConnected] = useState(true);
   const [lastUpdate, setLastUpdate] = useState(null);
 
+  // ---- helper to update one slot locally (optimistic UI) ----
+  function updateLocalSlot(dateKey, timeSlot, nextSlot) {
+    setSchedule(prev => ({
+      ...prev,
+      [dateKey]: {
+        ...(prev[dateKey] || {
+          morning: { person: null, completed: false },
+          evening: { person: null, completed: false }
+        }),
+        [timeSlot]: nextSlot
+      }
+    }));
+  }
+
   // Initialize or fetch schedule from Supabase
   useEffect(() => {
     fetchSchedule();
-    
+
     // Set up real-time subscription
     const subscription = supabase
       .channel('schedule_changes')
-      .on('postgres_changes', 
+      .on(
+        'postgres_changes',
         { event: '*', schema: 'public', table: 'feeding_schedule' },
-        (payload) => {
-          console.log('Real-time update received:', payload);
+        payload => {
+          // reconcile when realtime arrives
           handleRealtimeUpdate(payload);
         }
       )
-      .subscribe((status) => {
+      .subscribe(status => {
         setConnected(status === 'SUBSCRIBED');
       });
 
@@ -59,9 +76,7 @@ const CatFeedingScheduler = () => {
   const fetchSchedule = async () => {
     try {
       setLoading(true);
-      const { data, error } = await supabase
-        .from('feeding_schedule')
-        .select('*');
+      const { data, error } = await supabase.from('feeding_schedule').select('*');
 
       if (error) throw error;
 
@@ -94,12 +109,12 @@ const CatFeedingScheduler = () => {
     }
   };
 
-  const handleRealtimeUpdate = (payload) => {
+  const handleRealtimeUpdate = payload => {
     const { eventType, new: newRecord, old: oldRecord } = payload;
-    
+
     setSchedule(prev => {
       const updated = { ...prev };
-      
+
       if (eventType === 'DELETE') {
         if (updated[oldRecord.date]) {
           updated[oldRecord.date][oldRecord.time_slot] = {
@@ -115,86 +130,101 @@ const CatFeedingScheduler = () => {
           };
         }
       }
-      
+
       return updated;
     });
-    
+
     setLastUpdate(new Date());
   };
 
+  // ---------- OPTIMISTIC claim/unclaim ----------
   const handleSlotClick = async (dateKey, timeSlot) => {
-  if (!selectedPerson) {
-    alert('Please select your name first!');
-    return;
-  }
+    const current = schedule[dateKey]?.[timeSlot];
 
-  const currentSlot = schedule[dateKey]?.[timeSlot];
-  
-  try {
-    if (currentSlot?.person) {
-      // If slot is claimed by anyone, unclaim it
-      const { error } = await supabase
-        .from('feeding_schedule')
-        .delete()
-        .eq('date', dateKey)
-        .eq('time_slot', timeSlot);
-        
-      if (error) throw error;
-    } else {
-      // If slot is empty, claim it for the selected person
-      const { error } = await supabase
-        .from('feeding_schedule')
-        .upsert({
+    // require a name only when claiming an empty slot
+    if (!selectedPerson && !current?.person) {
+      alert('Please select your name first!');
+      return;
+    }
+
+    // keep a snapshot for rollback
+    const prevSlot = current || { person: null, completed: false };
+
+    try {
+      if (current?.person) {
+        // OPTIMISTIC: unclaim immediately
+        updateLocalSlot(dateKey, timeSlot, { person: null, completed: false });
+
+        const { error } = await supabase
+          .from('feeding_schedule')
+          .delete()
+          .eq('date', dateKey)
+          .eq('time_slot', timeSlot);
+
+        if (error) throw error;
+      } else {
+        // OPTIMISTIC: claim immediately
+        updateLocalSlot(dateKey, timeSlot, { person: selectedPerson, completed: false });
+
+        const { error } = await supabase.from('feeding_schedule').upsert({
           date: dateKey,
           time_slot: timeSlot,
           person: selectedPerson,
           completed: false
         });
-        
-      if (error) throw error;
-    }
-  } catch (error) {
-    console.error('Error updating slot:', error);
-    alert('Failed to update. Please check your connection.');
-  }
-};
 
-  const handleCompleteToggle = async (dateKey, timeSlot) => {
-    const currentSlot = schedule[dateKey]?.[timeSlot];
-    
-    if (!currentSlot?.person) return;
-    
-    try {
-      const { error } = await supabase
-        .from('feeding_schedule')
-        .update({ completed: !currentSlot.completed })
-        .eq('date', dateKey)
-        .eq('time_slot', timeSlot);
-        
-      if (error) throw error;
+        if (error) throw error;
+      }
     } catch (error) {
-      console.error('Error toggling completion:', error);
+      console.error('Error updating slot:', error);
+      // rollback UI if DB write failed
+      updateLocalSlot(dateKey, timeSlot, prevSlot);
       alert('Failed to update. Please check your connection.');
     }
   };
 
-  const formatDate = (date) => {
+  // ---------- OPTIMISTIC complete toggle ----------
+  const handleCompleteToggle = async (dateKey, timeSlot) => {
+    const current = schedule[dateKey]?.[timeSlot];
+    if (!current?.person) return;
+
+    const prev = current;
+    const optimistic = { ...current, completed: !current.completed };
+
+    try {
+      updateLocalSlot(dateKey, timeSlot, optimistic);
+
+      const { error } = await supabase
+        .from('feeding_schedule')
+        .update({ completed: optimistic.completed })
+        .eq('date', dateKey)
+        .eq('time_slot', timeSlot);
+
+      if (error) throw error;
+    } catch (error) {
+      console.error('Error toggling completion:', error);
+      updateLocalSlot(dateKey, timeSlot, prev);
+      alert('Failed to update. Please check your connection.');
+    }
+  };
+
+  const formatDate = date => {
     const options = { weekday: 'short', month: 'short', day: 'numeric' };
     return date.toLocaleDateString('en-US', options);
   };
 
-  const getSlotColor = (slot) => {
+  const getSlotColor = slot => {
     if (slot?.completed) return 'bg-green-100 border-green-400';
     if (slot?.person) return 'bg-blue-100 border-blue-400';
     return 'bg-gray-50 border-gray-300 hover:bg-gray-100';
   };
 
-  const getPersonColor = (person) => {
+  const getPersonColor = person => {
     const colors = {
-      'Karen': 'text-purple-700',
-      'Hillary': 'text-pink-700',
-      'Darlene': 'text-indigo-700',
-      'Kelly': 'text-teal-700'
+      Karen: 'text-purple-700',
+      Hillary: 'text-pink-700',
+      Darlene: 'text-indigo-700',
+      Kelly: 'text-teal-700'
     };
     return colors[person] || 'text-gray-700';
   };
@@ -234,13 +264,11 @@ const CatFeedingScheduler = () => {
             </>
           )}
           {lastUpdate && (
-            <span className="text-xs text-gray-500 ml-2">
-              Last update: {lastUpdate.toLocaleTimeString()}
-            </span>
+            <span className="text-xs text-gray-500 ml-2">Last update: {lastUpdate.toLocaleTimeString()}</span>
           )}
         </div>
       </div>
-      
+
       <div className="mb-4 p-4 bg-amber-50 rounded-lg border border-amber-200">
         <h3 className="font-semibold text-gray-700 mb-2">How to use:</h3>
         <ol className="text-sm text-gray-600 space-y-1 list-decimal list-inside">
@@ -251,7 +279,7 @@ const CatFeedingScheduler = () => {
           <li>Changes sync automatically for all users!</li>
         </ol>
       </div>
-      
+
       <div className="mb-6 bg-blue-50 p-4 rounded-lg">
         <label className="block text-lg font-semibold mb-3 text-gray-700">
           <User className="inline w-5 h-5 mr-2" />
@@ -273,7 +301,7 @@ const CatFeedingScheduler = () => {
           ))}
         </div>
       </div>
-      
+
       <div className="mb-4 flex items-center justify-center gap-6 text-sm">
         <div className="flex items-center gap-2">
           <div className="w-4 h-4 bg-gray-50 border border-gray-300 rounded"></div>
@@ -288,7 +316,7 @@ const CatFeedingScheduler = () => {
           <span>Completed</span>
         </div>
       </div>
-      
+
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
         {allDates.map(date => {
           const dateKey = date.toISOString().split('T')[0];
@@ -297,13 +325,11 @@ const CatFeedingScheduler = () => {
             evening: { person: null, completed: false }
           };
           const isToday = new Date().toDateString() === date.toDateString();
-          
+
           return (
-            <div 
-              key={dateKey} 
-              className={`border rounded-lg p-4 ${
-                isToday ? 'border-orange-400 bg-orange-50' : 'border-gray-200'
-              }`}
+            <div
+              key={dateKey}
+              className={`border rounded-lg p-4 ${isToday ? 'border-orange-400 bg-orange-50' : 'border-gray-200'}`}
             >
               <div className="mb-3">
                 <div className="font-semibold text-gray-800 flex items-center gap-2">
@@ -312,8 +338,9 @@ const CatFeedingScheduler = () => {
                 </div>
                 {isToday && <span className="text-xs text-orange-600 font-medium">TODAY</span>}
               </div>
-              
+
               <div className="space-y-2">
+                {/* Morning */}
                 <div className={`border-2 rounded-lg p-3 transition-all ${getSlotColor(daySchedule.morning)}`}>
                   <div className="flex items-center justify-between mb-2">
                     <div className="flex items-center gap-2">
@@ -326,22 +353,19 @@ const CatFeedingScheduler = () => {
                         className="p-1 rounded-full hover:bg-gray-200 transition-all"
                         title="Mark as completed"
                       >
-                        <div className={`w-6 h-6 rounded-full border-2 flex items-center justify-center transition-all ${
-                          daySchedule.morning.completed 
-                            ? 'bg-green-500 border-green-500' 
-                            : 'bg-white border-gray-400 hover:border-gray-600'
-                        }`}>
-                          {daySchedule.morning.completed && (
-                            <Check className="w-4 h-4 text-white" strokeWidth={3} />
-                          )}
+                        <div
+                          className={`w-6 h-6 rounded-full border-2 flex items-center justify-center transition-all ${
+                            daySchedule.morning.completed
+                              ? 'bg-green-500 border-green-500'
+                              : 'bg-white border-gray-400 hover:border-gray-600'
+                          }`}
+                        >
+                          {daySchedule.morning.completed && <Check className="w-4 h-4 text-white" strokeWidth={3} />}
                         </div>
                       </button>
                     )}
                   </div>
-                  <button
-                    onClick={() => handleSlotClick(dateKey, 'morning')}
-                    className="w-full text-left"
-                  >
+                  <button onClick={() => handleSlotClick(dateKey, 'morning')} className="w-full text-left">
                     {daySchedule.morning?.person ? (
                       <span className={`font-medium ${getPersonColor(daySchedule.morning.person)}`}>
                         {daySchedule.morning.person}
@@ -352,7 +376,8 @@ const CatFeedingScheduler = () => {
                     )}
                   </button>
                 </div>
-                
+
+                {/* Evening */}
                 <div className={`border-2 rounded-lg p-3 transition-all ${getSlotColor(daySchedule.evening)}`}>
                   <div className="flex items-center justify-between mb-2">
                     <div className="flex items-center gap-2">
@@ -365,22 +390,19 @@ const CatFeedingScheduler = () => {
                         className="p-1 rounded-full hover:bg-gray-200 transition-all"
                         title="Mark as completed"
                       >
-                        <div className={`w-6 h-6 rounded-full border-2 flex items-center justify-center transition-all ${
-                          daySchedule.evening.completed 
-                            ? 'bg-green-500 border-green-500' 
-                            : 'bg-white border-gray-400 hover:border-gray-600'
-                        }`}>
-                          {daySchedule.evening.completed && (
-                            <Check className="w-4 h-4 text-white" strokeWidth={3} />
-                          )}
+                        <div
+                          className={`w-6 h-6 rounded-full border-2 flex items-center justify-center transition-all ${
+                            daySchedule.evening.completed
+                              ? 'bg-green-500 border-green-500'
+                              : 'bg-white border-gray-400 hover:border-gray-600'
+                          }`}
+                        >
+                          {daySchedule.evening.completed && <Check className="w-4 h-4 text-white" strokeWidth={3} />}
                         </div>
                       </button>
                     )}
                   </div>
-                  <button
-                    onClick={() => handleSlotClick(dateKey, 'evening')}
-                    className="w-full text-left"
-                  >
+                  <button onClick={() => handleSlotClick(dateKey, 'evening')} className="w-full text-left">
                     {daySchedule.evening?.person ? (
                       <span className={`font-medium ${getPersonColor(daySchedule.evening.person)}`}>
                         {daySchedule.evening.person}
@@ -401,4 +423,3 @@ const CatFeedingScheduler = () => {
 };
 
 export default CatFeedingScheduler;
-
