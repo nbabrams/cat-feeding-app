@@ -123,43 +123,41 @@ const CatFeedingScheduler = () => {
   };
 
   const handleSlotClick = async (dateKey, timeSlot) => {
-    if (!selectedPerson) {
-      alert('Please select your name first!');
-      return;
-    }
+  if (!selectedPerson) {
+    alert('Please select your name first!');
+    return;
+  }
 
-    const currentSlot = schedule[dateKey]?.[timeSlot];
-    
-    try {
-      if (currentSlot?.person === selectedPerson) {
-        // Unclaim the slot
-        const { error } = await supabase
-          .from('feeding_schedule')
-          .delete()
-          .eq('date', dateKey)
-          .eq('time_slot', timeSlot);
-          
-        if (error) throw error;
-      } else if (!currentSlot?.person) {
-        // Claim the slot
-        const { error } = await supabase
-          .from('feeding_schedule')
-          .upsert({
-            date: dateKey,
-            time_slot: timeSlot,
-            person: selectedPerson,
-            completed: false
-          });
-          
-        if (error) throw error;
-      } else {
-        alert(`This slot is already claimed by ${currentSlot.person}`);
-      }
-    } catch (error) {
-      console.error('Error updating slot:', error);
-      alert('Failed to update. Please check your connection.');
+  const currentSlot = schedule[dateKey]?.[timeSlot];
+  
+  try {
+    if (currentSlot?.person) {
+      // If slot is claimed by anyone, unclaim it
+      const { error } = await supabase
+        .from('feeding_schedule')
+        .delete()
+        .eq('date', dateKey)
+        .eq('time_slot', timeSlot);
+        
+      if (error) throw error;
+    } else {
+      // If slot is empty, claim it for the selected person
+      const { error } = await supabase
+        .from('feeding_schedule')
+        .upsert({
+          date: dateKey,
+          time_slot: timeSlot,
+          person: selectedPerson,
+          completed: false
+        });
+        
+      if (error) throw error;
     }
-  };
+  } catch (error) {
+    console.error('Error updating slot:', error);
+    alert('Failed to update. Please check your connection.');
+  }
+};
 
   const handleCompleteToggle = async (dateKey, timeSlot) => {
     const currentSlot = schedule[dateKey]?.[timeSlot];
